@@ -1,5 +1,5 @@
 ---
-- name: Install Docker Engine on Ubuntu (AAP Survey Version)
+- name: Install Docker Engine on Ubuntu (Latest Version)
   hosts: all
   become: yes
   gather_facts: yes
@@ -65,7 +65,7 @@
       apt:
         update_cache: yes
 
-    # Install Docker Engine
+    # Install latest Docker Engine
     - name: Install latest Docker packages
       apt:
         name:
@@ -75,18 +75,6 @@
           - docker-buildx-plugin
           - docker-compose-plugin
         state: present
-      when: docker_version == "latest"
-
-    - name: Install specific Docker version
-      apt:
-        name:
-          - "docker-ce={{ docker_version }}"
-          - "docker-ce-cli={{ docker_version }}"
-          - containerd.io
-          - docker-buildx-plugin
-          - docker-compose-plugin
-        state: present
-      when: docker_version != "latest"
 
     # Post-installation steps
     - name: Start and enable Docker service
@@ -101,3 +89,11 @@
         groups: docker
         append: yes
       when: docker_user is defined and docker_user != ""
+
+    - name: Display completion message
+      debug:
+        msg: |
+          🐳 Docker Installation Complete!
+          Version: Latest
+          User added to docker group: {{ docker_user | default('None') }}
+          ⚠️  Important: {{ docker_user | default('User') }} must log out and log back in for docker group membership to take effect!
