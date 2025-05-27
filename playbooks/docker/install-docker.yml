@@ -1,5 +1,5 @@
 ---
-- name: Install Docker Engine on Ubuntu (AAP Survey Version)
+- name: Install Docker Engine on Ubuntu (Root User Version)
   hosts: all
   become: yes
   gather_facts: yes
@@ -10,11 +10,11 @@
         msg: "This playbook is designed for Ubuntu systems only. Detected: {{ ansible_distribution }}"
       when: ansible_distribution != "Ubuntu"
 
-    # Uninstall old versions (exact command from your doc)
+    # Uninstall old versions (exact command from official Docker docs)
     - name: Remove conflicting Docker packages
       shell: |
         for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do 
-          apt-get remove -y $pkg 2>/dev/null || true
+          apt-get remove $pkg
         done
 
     - name: Remove old Docker data (if clean installation requested)
@@ -23,7 +23,7 @@
         state: absent
       when: clean_install == "yes"
 
-    # Set up Docker's apt repository (exact steps from your doc)
+    # Set up Docker's apt repository
     - name: Update apt package index
       shell: apt-get update
 
@@ -48,7 +48,7 @@
     - name: Update apt after adding Docker repository
       shell: apt-get update
 
-    # Install Docker packages (exact command from your doc)
+    # Install Docker packages
     - name: Install latest Docker packages
       shell: apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
@@ -59,9 +59,18 @@
         state: started
         enabled: yes
 
-    - name: Add specified user to docker group
+    - name: Add specified user to docker group (if provided)
       user:
         name: "{{ docker_user }}"
         groups: docker
         append: yes
-      when: docker_user is defined and docker_user != ""
+      when: docker_user is defined and docker_user != "" and docker_user != "root"
+
+    - name: Test Docker installation
+      shell: docker --version
+      register: docker_version
+
+    - name: Test Docker daemon
+      shell: docker info
+      register: docker_info
+      failed_when: false
