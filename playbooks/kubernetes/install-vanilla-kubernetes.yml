@@ -56,84 +56,112 @@
       register: minikube_version
       changed_when: false
 
+    # Fix permission issues for root minikube execution
+    - name: Apply minikube permission fix
+      shell: sysctl fs.protected_regular=0
+      failed_when: false
+
+    - name: Clean up any existing minikube configuration
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /root/.minikube
+        - /tmp/juju-mk*
+      failed_when: false
+
+    - name: Create minikube directory with proper permissions
+      file:
+        path: /root/.minikube
+        state: directory
+        mode: '0755'
+
     # Start Kubernetes Cluster as root with --force flag (as per documentation)
-    - name: Start minikube cluster with Docker driver as root
-      shell: minikube start --driver=docker --force
+    - name: Start minikube cluster with Docker driver as root (attempt 1)
+      shell: |
+        export MINIKUBE_IN_STYLE=false
+        export CHANGE_MINIKUBE_NONE_USER=true
+        minikube start --driver=docker --force
       timeout: 600
       when: start_cluster == "yes"
       register: minikube_start_result
+      failed_when: false
+
+    - name: Try alternative minikube start with none driver if docker fails
+      shell: |
+        export MINIKUBE_IN_STYLE=false
+        export CHANGE_MINIKUBE_NONE_USER=true
+        minikube start --driver=none --force
+      timeout: 600
+      when: start_cluster == "yes" and minikube_start_result.rc != 0
+      register: minikube_start_none
+      failed_when: false
+
+    - name: Try minikube start with additional flags if previous attempts failed
+      shell: |
+        export MINIKUBE_IN_STYLE=false
+        export CHANGE_MINIKUBE_NONE_USER=true
+        minikube start --driver=docker --force --alsologtostderr
+      timeout: 600
+      when: start_cluster == "yes" and minikube_start_result.rc != 0 and minikube_start_none.rc != 0
+      register: minikube_start_final
 
     - name: Display minikube start output
       debug:
-        msg: "{{ minikube_start_result.stdout_lines }}"
-      when: start_cluster == "yes" and minikube_start_result is defined
+        msg: |
+          Minikube Start Results:
+          {% if minikube_start_result.rc == 0 %}
+          ✅ SUCCESS with Docker driver:
+          {{ minikube_start_result.stdout }}
+          {% elif minikube_start_none is defined and minikube_start_none.rc == 0 %}
+          ✅ SUCCESS with None driver:
+          {{ minikube_start_none.stdout }}
+          {% elif minikube_start_final is defined and minikube_start_final.rc == 0 %}
+          ✅ SUCCESS with additional flags:
+          {{ minikube_start_final.stdout }}
+          {% else %}
+          ❌ FAILED attempts:
+          Docker driver error: {{ minikube_start_result.stderr | default('No error message') }}
+          {% if minikube_start_none is defined %}
+          None driver error: {{ minikube_start_none.stderr | default('No error message') }}
+          {% endif %}
+          {% if minikube_start_final is defined %}
+          Final attempt error: {{ minikube_start_final.stderr | default('No error message') }}
+          {% endif %}
+          {% endif %}
+      when: start_cluster == "yes"
+
+    - name: Determine successful minikube start
+      set_fact:
+        minikube_started: >-
+          {{
+            (minikube_start_result.rc == 0) or
+            (minikube_start_none is defined and minikube_start_none.rc == 0) or
+            (minikube_start_final is defined and minikube_start_final.rc == 0)
+          }}
+      when: start_cluster == "yes"
 
     # Verify installation (commands from your documentation)
     - name: Check cluster status
       shell: minikube status
       register: cluster_status
-      when: start_cluster == "yes"
+      when: start_cluster == "yes" and minikube_started
       failed_when: false
 
     - name: View all system pods (core components)
       shell: kubectl get pods -n kube-system
       register: system_pods
-      when: start_cluster == "yes"
+      when: start_cluster == "yes" and minikube_started
       failed_when: false
 
     - name: Check cluster nodes
       shell: kubectl get nodes
       register: cluster_nodes
-      when: start_cluster == "yes"
+      when: start_cluster == "yes" and minikube_started
       failed_when: false
 
     - name: View cluster information
       shell: kubectl cluster-info
       register: cluster_info
-      when: start_cluster == "yes"
+      when: start_cluster == "yes" and minikube_started
       failed_when: false
-
-    - name: Display final status
-      debug:
-        msg: |
-          🎉 Vanilla Kubernetes Installation Complete!
-          
-          ✅ kubectl: {{ kubectl_version.stdout }}
-          ✅ minikube: {{ minikube_version.stdout }}
-          👤 Running as: root user
-          
-          {% if start_cluster == "yes" %}
-          🚀 Kubernetes Cluster Status:
-          {% if cluster_status.rc == 0 %}
-          {{ cluster_status.stdout }}
-          {% endif %}
-          
-          {% if cluster_info.rc == 0 %}
-          📋 Cluster Information:
-          {{ cluster_info.stdout }}
-          {% endif %}
-          
-          {% if cluster_nodes.rc == 0 %}
-          🏷️  Cluster Nodes:
-          {{ cluster_nodes.stdout }}
-          {% endif %}
-          
-          {% if system_pods.rc == 0 %}
-          🧩 Core Kubernetes Components Running:
-          {{ system_pods.stdout_lines | length }} system pods active
-          {% endif %}
-          
-          {% else %}
-          ⏸️  Kubernetes Cluster: Ready to start
-          ▶️  To start: minikube start --driver=docker --force
-          {% endif %}
-
-          🔧 Useful Commands (from documentation):
-          • Check status: minikube status
-          • View system pods: kubectl get pods -n kube-system
-          • Check nodes: kubectl get nodes
-          • Cluster info: kubectl cluster-info
-          • All pods: kubectl get pods -A
-          • Stop cluster: minikube stop
-          • Delete cluster: minikube delete
-          • Access dashboard: minikube dashboard
