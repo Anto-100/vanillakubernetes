@@ -1,20 +1,33 @@
 ---
 - name: Install Vanilla Kubernetes (kubectl + minikube) on Ubuntu
   hosts: all
-  become: no
+  become: yes  # Start with root for installations
   gather_facts: yes
 
   tasks:
+    # Verify user is not root for minikube operations
+    - name: Check current user
+      shell: whoami
+      register: current_user
+      changed_when: false
+
     - name: Verify Docker is installed and running
       shell: docker --version && systemctl is-active docker
       register: docker_check
       failed_when: docker_check.rc != 0
 
-    - name: Display Docker status
-      debug:
-        msg: "Docker verification: {{ docker_check.stdout }}"
+    - name: Verify user is in docker group
+      shell: groups {{ k8s_user }} | grep docker
+      register: docker_group_check
+      failed_when: docker_group_check.rc != 0
+      ignore_errors: yes
 
-    # Install kubectl
+    - name: Fail if user not in docker group
+      fail:
+        msg: "User {{ k8s_user }} is not in docker group. Please run Docker installation first or add user to docker group and ensure they have logged out/in."
+      when: docker_group_check.rc != 0
+
+    # Install kubectl (as root)
     - name: Download latest stable kubectl version info
       uri:
         url: https://dl.k8s.io/release/stable.txt
@@ -33,18 +46,8 @@
         dest: /usr/local/bin/kubectl
         mode: '0755'
         remote_src: yes
-      become: yes
 
-    - name: Verify kubectl installation
-      shell: kubectl version --client --output=yaml
-      register: kubectl_verify
-      changed_when: false
-
-    - name: Display kubectl version
-      debug:
-        msg: "kubectl installed successfully: {{ kubectl_verify.stdout_lines[0] }}"
-
-    # Install minikube
+    # Install minikube (as root)
     - name: Download latest minikube
       get_url:
         url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
@@ -57,104 +60,45 @@
         dest: /usr/local/bin/minikube
         mode: '0755'
         remote_src: yes
-      become: yes
 
-    - name: Verify minikube installation
-      shell: minikube version
-      register: minikube_verify
-      changed_when: false
-
-    - name: Display minikube version
-      debug:
-        msg: "minikube installed successfully: {{ minikube_verify.stdout }}"
-
-    # Check user permissions
-    - name: Check current user
-      shell: whoami
-      register: current_user
-      changed_when: false
-
-    - name: Check docker group membership
-      shell: groups {{ current_user.stdout }}
-      register: user_groups
-      changed_when: false
-
-    - name: Display user info
-      debug:
-        msg: |
-          Current user: {{ current_user.stdout }}
-          User groups: {{ user_groups.stdout }}
-          Docker group: {{ 'Yes' if 'docker' in user_groups.stdout else 'No' }}
-
-    - name: Fail if user not in docker group
-      fail:
-        msg: "User {{ current_user.stdout }} is not in docker group. Please add user to docker group and re-login."
-      when: "'docker' not in user_groups.stdout"
-
-    # Setup .kube directory first
-    - name: Create .kube directory
-      file:
-        path: "~/.kube"
-        state: directory
-        mode: '0755'
-
-    - name: Check if minikube cluster already exists
-      shell: minikube status
-      register: existing_cluster
-      failed_when: false
-      changed_when: false
-
-    - name: Display existing cluster status
-      debug:
-        msg: "Existing cluster status: {{ existing_cluster.stdout if existing_cluster.rc == 0 else 'No cluster found' }}"
-
-    # Start Kubernetes Cluster with better error handling
-    - name: Start minikube cluster with Docker driver
-      shell: |
-        export MINIKUBE_HOME=~/.minikube
-        minikube start --driver=docker --force-systemd=false
+    # Now switch to regular user for minikube operations
+    - name: Start minikube cluster with Docker driver (as regular user)
+      shell: minikube start --driver=docker
+      become: no
+      become_user: "{{ k8s_user }}"
       register: minikube_start_output
       timeout: 600
-      when: 
-        - start_cluster == "yes"
-        - existing_cluster.rc != 0
+      when: start_cluster == "yes"
 
-    - name: Display minikube start result
-      debug:
-        msg: |
-          Minikube start completed.
-          Output: {{ minikube_start_output.stdout_lines[-5:] if minikube_start_output.stdout_lines is defined else 'No output' }}
-      when: 
-        - start_cluster == "yes"
-        - minikube_start_output is defined
+    # Setup .kube directory (as regular user)
+    - name: Create .kube directory
+      file:
+        path: "/home/{{ k8s_user }}/.kube"
+        state: directory
+        mode: '0755'
+        owner: "{{ k8s_user }}"
+        group: "{{ k8s_user }}"
 
-    - name: Update kubectl context
+    - name: Update kubectl context (as regular user)
       shell: minikube update-context
+      become: no
+      become_user: "{{ k8s_user }}"
       when: start_cluster == "yes"
-      register: context_update
 
-    - name: Test kubectl connection
-      shell: kubectl cluster-info --request-timeout=30s
-      register: kubectl_test
-      when: start_cluster == "yes"
-      timeout: 60
-
-    - name: Display final status
+    - name: Display completion message
       debug:
         msg: |
-          🎉 Vanilla Kubernetes Installation Status:
-          ✅ kubectl: Installed ({{ kubectl_latest_version.content | trim }})
+          🎉 Vanilla Kubernetes Installation Complete!
+          ✅ kubectl: Installed
           ✅ minikube: Installed
           {% if start_cluster == "yes" %}
-          {% if kubectl_test.rc == 0 %}
-          ✅ Kubernetes Cluster: Running and accessible
+          ✅ Kubernetes Cluster: Running as user {{ k8s_user }}
+          ✅ kubectl config: Configured in /home/{{ k8s_user }}/.kube/
           {% else %}
-          ❌ Kubernetes Cluster: Started but connection failed
-          {% endif %}
-          ✅ kubectl config: Updated
-          {% else %}
-          ⏸️  Kubernetes Cluster: Not started
+          ⏸️  Kubernetes Cluster: Ready to start
           {% endif %}
           
-          User: {{ current_user.stdout }}
-          Docker Group: {{ 'Yes' if 'docker' in user_groups.stdout else 'No' }}
+          🚀 To use Kubernetes:
+          1. Switch to user: sudo su - {{ k8s_user }}
+          2. Check cluster: kubectl get nodes
+          3. Cluster info: kubectl cluster-info

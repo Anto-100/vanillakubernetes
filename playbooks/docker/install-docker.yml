@@ -1,5 +1,5 @@
 ---
-- name: Install Latest Docker Engine on Ubuntu
+- name: Install Docker Engine on Ubuntu (AAP Survey Version)
   hosts: all
   become: yes
   gather_facts: yes
@@ -10,7 +10,7 @@
         msg: "This playbook is designed for Ubuntu systems only. Detected: {{ ansible_distribution }}"
       when: ansible_distribution != "Ubuntu"
 
-    # Uninstall old versions (exact from your doc)
+    # Remove old Docker packages
     - name: Remove old Docker packages
       apt:
         name:
@@ -31,12 +31,12 @@
         state: absent
       when: clean_install == "yes"
 
-    # Set up Docker's apt repository (exact steps from your doc)
+    # Set up Docker's apt repository
     - name: Update apt package index
       apt:
         update_cache: yes
 
-    - name: Install ca-certificates and curl
+    - name: Install packages to allow apt to use repository over HTTPS
       apt:
         name:
           - ca-certificates
@@ -44,26 +44,28 @@
         state: present
 
     - name: Create directory for apt keyrings
-      shell: sudo install -m 0755 -d /etc/apt/keyrings
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
 
     - name: Add Docker's official GPG key
-      shell: sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
 
-    - name: Set permissions on Docker GPG key
-      shell: sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-    - name: Add Docker repository to Apt sources
+    - name: Add Docker repository to apt sources
       shell: |
         echo \
         "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
         $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-        sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+        tee /etc/apt/sources.list.d/docker.list > /dev/null
 
     - name: Update apt package index after adding Docker repository
       apt:
         update_cache: yes
 
-    # Install the latest Docker packages (exact from your doc)
+    # Install Docker Engine
     - name: Install latest Docker packages
       apt:
         name:
@@ -73,8 +75,20 @@
           - docker-buildx-plugin
           - docker-compose-plugin
         state: present
+      when: docker_version == "latest"
 
-    # Post-installation
+    - name: Install specific Docker version
+      apt:
+        name:
+          - "docker-ce={{ docker_version }}"
+          - "docker-ce-cli={{ docker_version }}"
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      when: docker_version != "latest"
+
+    # Post-installation steps
     - name: Start and enable Docker service
       systemd:
         name: docker
@@ -92,9 +106,7 @@
       debug:
         msg: |
           🐳 Docker Installation Complete!
-          ✅ Latest Docker version installed
-          ✅ Service started and enabled
-          {% if docker_user is defined and docker_user != "" %}
-          ✅ User {{ docker_user }} added to docker group
-          ⚠️  Important: {{ docker_user }} must log out and log back in!
-          {% endif %}
+          ✅ User {{ docker_user | default('') }} added to docker group
+          ⚠️  Important: User must log out and log back in for docker group membership to take effect!
+          
+          Next: Run Kubernetes installation using {{ docker_user }} user (not root)
