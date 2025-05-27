@@ -1,0 +1,65 @@
+---
+- name: Install Vanilla Kubernetes (kubectl + minikube) on Ubuntu
+  hosts: all
+  become: no
+  gather_facts: yes
+
+  tasks:
+    - name: Verify Docker is installed and running
+      shell: docker --version && systemctl is-active docker
+      register: docker_check
+      failed_when: docker_check.rc != 0
+
+    # Install kubectl
+    - name: Download latest stable kubectl version info
+      uri:
+        url: https://dl.k8s.io/release/stable.txt
+        return_content: yes
+      register: kubectl_latest_version
+
+    - name: Download latest stable kubectl binary
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_latest_version.content | trim }}/bin/linux/amd64/kubectl"
+        dest: /tmp/kubectl
+        mode: '0755'
+
+    - name: Move kubectl to system PATH
+      copy:
+        src: /tmp/kubectl
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+        remote_src: yes
+      become: yes
+
+    # Install minikube
+    - name: Download latest minikube
+      get_url:
+        url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        dest: /tmp/minikube
+        mode: '0755'
+
+    - name: Move minikube to system PATH
+      copy:
+        src: /tmp/minikube
+        dest: /usr/local/bin/minikube
+        mode: '0755'
+        remote_src: yes
+      become: yes
+
+    # Start Kubernetes Cluster
+    - name: Start minikube cluster with Docker driver
+      shell: minikube start --driver=docker
+      register: minikube_start_output
+      timeout: 600
+      when: start_cluster == "yes"
+
+    # Setup .kube directory
+    - name: Create .kube directory
+      file:
+        path: "~/.kube"
+        state: directory
+        mode: '0755'
+
+    - name: Update kubectl context
+      shell: minikube update-context
+      when: start_cluster == "yes"
