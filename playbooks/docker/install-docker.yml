@@ -10,20 +10,12 @@
         msg: "This playbook is designed for Ubuntu systems only. Detected: {{ ansible_distribution }}"
       when: ansible_distribution != "Ubuntu"
 
-    # Remove old Docker packages
-    - name: Remove old Docker packages
-      apt:
-        name:
-          - docker.io
-          - docker-doc
-          - docker-compose
-          - docker-compose-v2
-          - podman-docker
-          - containerd
-          - runc
-        state: absent
-        purge: yes
-      ignore_errors: yes
+    # Uninstall old versions (exact command from your doc)
+    - name: Remove conflicting Docker packages
+      shell: |
+        for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do 
+          apt-get remove -y $pkg 2>/dev/null || true
+        done
 
     - name: Remove old Docker data (if clean installation requested)
       file:
@@ -31,62 +23,34 @@
         state: absent
       when: clean_install == "yes"
 
-    # Set up Docker's apt repository
+    # Set up Docker's apt repository (exact steps from your doc)
     - name: Update apt package index
-      apt:
-        update_cache: yes
+      shell: apt-get update
 
-    - name: Install packages to allow apt to use repository over HTTPS
-      apt:
-        name:
-          - ca-certificates
-          - curl
-        state: present
+    - name: Install ca-certificates and curl
+      shell: apt-get install -y ca-certificates curl
 
-    - name: Create directory for apt keyrings
-      file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: '0755'
+    - name: Create keyrings directory
+      shell: install -m 0755 -d /etc/apt/keyrings
 
     - name: Add Docker's official GPG key
       shell: |
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
         chmod a+r /etc/apt/keyrings/docker.asc
 
-    - name: Add Docker repository to apt sources
+    - name: Add Docker repository to Apt sources
       shell: |
         echo \
         "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
         $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
         tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    - name: Update apt package index after adding Docker repository
-      apt:
-        update_cache: yes
+    - name: Update apt after adding Docker repository
+      shell: apt-get update
 
-    # Install Docker Engine
+    # Install Docker packages (exact command from your doc)
     - name: Install latest Docker packages
-      apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-          - docker-buildx-plugin
-          - docker-compose-plugin
-        state: present
-      when: docker_version == "latest"
-
-    - name: Install specific Docker version
-      apt:
-        name:
-          - "docker-ce={{ docker_version }}"
-          - "docker-ce-cli={{ docker_version }}"
-          - containerd.io
-          - docker-buildx-plugin
-          - docker-compose-plugin
-        state: present
-      when: docker_version != "latest"
+      shell: apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
     # Post-installation steps
     - name: Start and enable Docker service
@@ -101,12 +65,3 @@
         groups: docker
         append: yes
       when: docker_user is defined and docker_user != ""
-
-    - name: Display completion message
-      debug:
-        msg: |
-          🐳 Docker Installation Complete!
-          ✅ User {{ docker_user | default('') }} added to docker group
-          ⚠️  Important: User must log out and log back in for docker group membership to take effect!
-          
-          Next: Run Kubernetes installation using {{ docker_user }} user (not root)
