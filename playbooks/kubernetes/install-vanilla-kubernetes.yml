@@ -10,6 +10,10 @@
       register: docker_check
       failed_when: docker_check.rc != 0
 
+    - name: Display Docker status
+      debug:
+        msg: "Docker verification: {{ docker_check.stdout }}"
+
     # Install kubectl
     - name: Download latest stable kubectl version info
       uri:
@@ -31,6 +35,15 @@
         remote_src: yes
       become: yes
 
+    - name: Verify kubectl installation
+      shell: kubectl version --client --output=yaml
+      register: kubectl_verify
+      changed_when: false
+
+    - name: Display kubectl version
+      debug:
+        msg: "kubectl installed successfully: {{ kubectl_verify.stdout_lines[0] }}"
+
     # Install minikube
     - name: Download latest minikube
       get_url:
@@ -46,20 +59,102 @@
         remote_src: yes
       become: yes
 
-    # Start Kubernetes Cluster
-    - name: Start minikube cluster with Docker driver
-      shell: minikube start --driver=docker
-      register: minikube_start_output
-      timeout: 600
-      when: start_cluster == "yes"
+    - name: Verify minikube installation
+      shell: minikube version
+      register: minikube_verify
+      changed_when: false
 
-    # Setup .kube directory
+    - name: Display minikube version
+      debug:
+        msg: "minikube installed successfully: {{ minikube_verify.stdout }}"
+
+    # Check user permissions
+    - name: Check current user
+      shell: whoami
+      register: current_user
+      changed_when: false
+
+    - name: Check docker group membership
+      shell: groups {{ current_user.stdout }}
+      register: user_groups
+      changed_when: false
+
+    - name: Display user info
+      debug:
+        msg: |
+          Current user: {{ current_user.stdout }}
+          User groups: {{ user_groups.stdout }}
+          Docker group: {{ 'Yes' if 'docker' in user_groups.stdout else 'No' }}
+
+    - name: Fail if user not in docker group
+      fail:
+        msg: "User {{ current_user.stdout }} is not in docker group. Please add user to docker group and re-login."
+      when: "'docker' not in user_groups.stdout"
+
+    # Setup .kube directory first
     - name: Create .kube directory
       file:
         path: "~/.kube"
         state: directory
         mode: '0755'
 
+    - name: Check if minikube cluster already exists
+      shell: minikube status
+      register: existing_cluster
+      failed_when: false
+      changed_when: false
+
+    - name: Display existing cluster status
+      debug:
+        msg: "Existing cluster status: {{ existing_cluster.stdout if existing_cluster.rc == 0 else 'No cluster found' }}"
+
+    # Start Kubernetes Cluster with better error handling
+    - name: Start minikube cluster with Docker driver
+      shell: |
+        export MINIKUBE_HOME=~/.minikube
+        minikube start --driver=docker --force-systemd=false
+      register: minikube_start_output
+      timeout: 600
+      when: 
+        - start_cluster == "yes"
+        - existing_cluster.rc != 0
+
+    - name: Display minikube start result
+      debug:
+        msg: |
+          Minikube start completed.
+          Output: {{ minikube_start_output.stdout_lines[-5:] if minikube_start_output.stdout_lines is defined else 'No output' }}
+      when: 
+        - start_cluster == "yes"
+        - minikube_start_output is defined
+
     - name: Update kubectl context
       shell: minikube update-context
       when: start_cluster == "yes"
+      register: context_update
+
+    - name: Test kubectl connection
+      shell: kubectl cluster-info --request-timeout=30s
+      register: kubectl_test
+      when: start_cluster == "yes"
+      timeout: 60
+
+    - name: Display final status
+      debug:
+        msg: |
+          🎉 Vanilla Kubernetes Installation Status:
+          ✅ kubectl: Installed ({{ kubectl_latest_version.content | trim }})
+          ✅ minikube: Installed
+          {% if start_cluster == "yes" %}
+          {% if kubectl_test.rc == 0 %}
+          ✅ Kubernetes Cluster: Running and accessible
+          {% else %}
+          ❌ Kubernetes Cluster: Started but connection failed
+          {% endif %}
+          ✅ kubectl config: Updated
+          {% else %}
+          ⏸️  Kubernetes Cluster: Not started
+          {% endif %}
+          
+          User: {{ current_user.stdout }}
+          Docker Group: {{ 'Yes' if 'docker' in user_groups.stdout else 'No' }}
