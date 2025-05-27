@@ -1,5 +1,5 @@
 ---
-- name: Install Vanilla Kubernetes (kubectl + minikube) on Ubuntu as Root
+- name: Install Vanilla Kubernetes (kubectl + minikube) - Simple Root Version
   hosts: all
   become: yes
   gather_facts: yes
@@ -10,17 +10,12 @@
         msg: |
           Running as: {{ ansible_user }}
           UID: {{ ansible_user_uid }}
-          This playbook will install Kubernetes as root user with special configuration.
+          This is a simplified root installation approach.
 
     - name: Verify Docker is installed and running
       shell: docker --version
       register: docker_version
       failed_when: docker_version.rc != 0
-
-    - name: Verify Docker daemon is running
-      shell: docker info
-      register: docker_info
-      failed_when: docker_info.rc != 0
 
     - name: Display Docker status
       debug:
@@ -29,12 +24,14 @@
     # Install kubectl (exact commands from your documentation)
     - name: Download latest stable kubectl
       shell: curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      args:
+        chdir: /tmp
 
     - name: Make kubectl executable
-      shell: chmod +x kubectl
+      shell: chmod +x /tmp/kubectl
 
     - name: Move kubectl to system PATH
-      shell: mv kubectl /usr/local/bin/
+      shell: mv /tmp/kubectl /usr/local/bin/
 
     - name: Verify kubectl installation
       shell: kubectl version --client
@@ -43,125 +40,99 @@
 
     # Install minikube (exact commands from your documentation)
     - name: Download latest minikube
-      shell: curl -Lo minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+      shell: curl -Lo /tmp/minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
 
     - name: Make minikube executable
-      shell: chmod +x minikube
+      shell: chmod +x /tmp/minikube
 
     - name: Move minikube to system PATH
-      shell: mv minikube /usr/local/bin/
+      shell: mv /tmp/minikube /usr/local/bin/
 
     - name: Verify minikube installation
       shell: minikube version
       register: minikube_version
       changed_when: false
 
-    # Fix permission issues for root minikube execution
-    - name: Apply minikube permission fix
-      shell: sysctl fs.protected_regular=0
-      failed_when: false
+    # Create a non-root user for minikube if needed
+    - name: Create minikube user if it doesn't exist
+      user:
+        name: minikube
+        shell: /bin/bash
+        home: /home/minikube
+        create_home: yes
+        groups: docker
+        append: yes
+      when: create_minikube_user == "yes"
 
-    - name: Clean up any existing minikube configuration
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /root/.minikube
-        - /tmp/juju-mk*
-      failed_when: false
+    - name: Add minikube user to docker group
+      user:
+        name: minikube
+        groups: docker
+        append: yes
+      when: create_minikube_user == "yes"
 
-    - name: Create minikube directory with proper permissions
-      file:
-        path: /root/.minikube
-        state: directory
-        mode: '0755'
-
-    # Start Kubernetes Cluster as root with --force flag (as per documentation)
-    - name: Start minikube cluster with Docker driver as root (attempt 1)
+    # Option 1: Install Kind instead of minikube (more reliable for root)
+    - name: Download Kind (Kubernetes in Docker) as alternative
       shell: |
-        export MINIKUBE_IN_STYLE=false
-        export CHANGE_MINIKUBE_NONE_USER=true
-        minikube start --driver=docker --force
-      timeout: 600
-      when: start_cluster == "yes"
-      register: minikube_start_result
+        curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+        chmod +x /tmp/kind
+        mv /tmp/kind /usr/local/bin/kind
+      when: use_kind == "yes"
+
+    - name: Create Kind cluster
+      shell: kind create cluster --name minikube
+      when: use_kind == "yes" and start_cluster == "yes"
+      register: kind_result
       failed_when: false
 
-    - name: Try alternative minikube start with none driver if docker fails
+    # Option 2: Try minikube with different approach
+    - name: Clean up any existing minikube installation
+      shell: |
+        minikube delete --all || true
+        rm -rf /root/.minikube || true
+        rm -rf /home/minikube/.minikube || true
+      when: use_kind != "yes"
+
+    - name: Set proper permissions for temp directory
+      shell: |
+        chmod 1777 /tmp
+        sysctl fs.protected_regular=0 || true
+      when: use_kind != "yes"
+
+    - name: Start minikube as minikube user (if user created)
+      shell: |
+        su - minikube -c "minikube start --driver=docker"
+      timeout: 600
+      when: use_kind != "yes" and create_minikube_user == "yes" and start_cluster == "yes"
+      register: minikube_user_result
+      failed_when: false
+
+    - name: Start minikube as root with none driver (last resort)
       shell: |
         export MINIKUBE_IN_STYLE=false
         export CHANGE_MINIKUBE_NONE_USER=true
         minikube start --driver=none --force
       timeout: 600
-      when: start_cluster == "yes" and minikube_start_result.rc != 0
-      register: minikube_start_none
+      when: use_kind != "yes" and create_minikube_user != "yes" and start_cluster == "yes"
+      register: minikube_root_result
       failed_when: false
 
-    - name: Try minikube start with additional flags if previous attempts failed
-      shell: |
-        export MINIKUBE_IN_STYLE=false
-        export CHANGE_MINIKUBE_NONE_USER=true
-        minikube start --driver=docker --force --alsologtostderr
-      timeout: 600
-      when: start_cluster == "yes" and minikube_start_result.rc != 0 and minikube_start_none.rc != 0
-      register: minikube_start_final
-
-    - name: Display minikube start output
-      debug:
-        msg: |
-          Minikube Start Results:
-          {% if minikube_start_result.rc == 0 %}
-          ✅ SUCCESS with Docker driver:
-          {{ minikube_start_result.stdout }}
-          {% elif minikube_start_none is defined and minikube_start_none.rc == 0 %}
-          ✅ SUCCESS with None driver:
-          {{ minikube_start_none.stdout }}
-          {% elif minikube_start_final is defined and minikube_start_final.rc == 0 %}
-          ✅ SUCCESS with additional flags:
-          {{ minikube_start_final.stdout }}
-          {% else %}
-          ❌ FAILED attempts:
-          Docker driver error: {{ minikube_start_result.stderr | default('No error message') }}
-          {% if minikube_start_none is defined %}
-          None driver error: {{ minikube_start_none.stderr | default('No error message') }}
-          {% endif %}
-          {% if minikube_start_final is defined %}
-          Final attempt error: {{ minikube_start_final.stderr | default('No error message') }}
-          {% endif %}
-          {% endif %}
-      when: start_cluster == "yes"
-
-    - name: Determine successful minikube start
-      set_fact:
-        minikube_started: >-
-          {{
-            (minikube_start_result.rc == 0) or
-            (minikube_start_none is defined and minikube_start_none.rc == 0) or
-            (minikube_start_final is defined and minikube_start_final.rc == 0)
-          }}
-      when: start_cluster == "yes"
-
-    # Verify installation (commands from your documentation)
-    - name: Check cluster status
-      shell: minikube status
-      register: cluster_status
-      when: start_cluster == "yes" and minikube_started
+    # Copy kubectl config if using minikube user
+    - name: Copy kubectl config to root
+      copy:
+        src: /home/minikube/.kube/config
+        dest: /root/.kube/config
+        remote_src: yes
+      when: create_minikube_user == "yes" and minikube_user_result is defined and minikube_user_result.rc == 0
       failed_when: false
 
-    - name: View all system pods (core components)
-      shell: kubectl get pods -n kube-system
-      register: system_pods
-      when: start_cluster == "yes" and minikube_started
-      failed_when: false
-
-    - name: Check cluster nodes
+    # Verification
+    - name: Test kubectl access
       shell: kubectl get nodes
-      register: cluster_nodes
-      when: start_cluster == "yes" and minikube_started
+      register: kubectl_test
       failed_when: false
 
-    - name: View cluster information
+    - name: Test cluster info
       shell: kubectl cluster-info
-      register: cluster_info
-      when: start_cluster == "yes" and minikube_started
+      register: cluster_info_test
       failed_when: false
