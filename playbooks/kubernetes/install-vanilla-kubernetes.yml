@@ -1,16 +1,43 @@
 ---
 - name: Install Vanilla Kubernetes (kubectl + minikube) on Ubuntu
   hosts: all
-  become: no
+  become: no  # CRITICAL: Never become root for this playbook
   gather_facts: yes
   vars:
-    k8s_user: "{{ ansible_user }}"  # Use the current SSH user, not root
+    k8s_user: "{{ ansible_user }}"
 
   tasks:
-    - name: Fail if running as root user
+    - name: Display current user information
+      debug:
+        msg: |
+          Current user: {{ ansible_user }}
+          Current UID: {{ ansible_user_uid }}
+          Current GID: {{ ansible_user_gid }}
+          Effective user: {{ ansible_env.USER | default('unknown') }}
+
+    - name: Fail if running as root user (check ansible_user)
       fail:
-        msg: "minikube should not be run as root user. Please run this playbook with a non-root user (like admin1)."
+        msg: "minikube should not be run as root user. Current ansible_user: {{ ansible_user }}"
       when: ansible_user == "root"
+
+    - name: Fail if running as root user (check effective UID)
+      fail:
+        msg: "minikube should not be run as root user. Current UID: {{ ansible_user_uid }}"
+      when: ansible_user_uid == 0
+
+    - name: Fail if running as root user (check environment)
+      fail:
+        msg: "minikube should not be run as root user. Current USER env: {{ ansible_env.USER | default('unknown') }}"
+      when: ansible_env.USER is defined and ansible_env.USER == "root"
+
+    - name: Check current user groups
+      shell: groups
+      register: current_groups
+      changed_when: false
+
+    - name: Display current groups
+      debug:
+        msg: "Current user groups: {{ current_groups.stdout }}"
 
     - name: Check if user is in docker group
       shell: groups {{ k8s_user }} | grep docker
@@ -20,7 +47,10 @@
 
     - name: Fail if user not in docker group
       fail:
-        msg: "User {{ k8s_user }} is not in docker group. Please add user to docker group and re-login."
+        msg: |
+          User {{ k8s_user }} is not in docker group. 
+          Current groups: {{ current_groups.stdout }}
+          Please add user to docker group and re-login: sudo usermod -aG docker {{ k8s_user }}
       when: docker_group_check.rc != 0
 
     - name: Verify Docker is accessible by current user
@@ -28,7 +58,11 @@
       register: docker_access_check
       failed_when: docker_access_check.rc != 0
 
-    # Install kubectl
+    - name: Display Docker access confirmation
+      debug:
+        msg: "✅ Docker is accessible by user {{ k8s_user }}"
+
+    # Install kubectl (these tasks need sudo)
     - name: Download latest stable kubectl version info
       uri:
         url: https://dl.k8s.io/release/stable.txt
@@ -47,9 +81,9 @@
         dest: /usr/local/bin/kubectl
         mode: '0755'
         remote_src: yes
-      become: yes
+      become: yes  # Only this task needs sudo
 
-    # Install minikube
+    # Install minikube (these tasks need sudo)
     - name: Download latest minikube
       get_url:
         url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
@@ -62,21 +96,97 @@
         dest: /usr/local/bin/minikube
         mode: '0755'
         remote_src: yes
-      become: yes
+      become: yes  # Only this task needs sudo
 
-    # Start Kubernetes Cluster
-    - name: Start minikube cluster with Docker driver
-      shell: minikube start --driver=docker
-      timeout: 600
-      when: start_cluster == "yes"
+    # Verify installations as non-root user
+    - name: Verify kubectl installation
+      shell: kubectl version --client --output=yaml
+      register: kubectl_version
+      changed_when: false
 
-    # Setup .kube directory
+    - name: Display kubectl version
+      debug:
+        msg: "✅ kubectl installed: {{ kubectl_version.stdout_lines[1] | default('Version info available') }}"
+
+    - name: Verify minikube installation
+      shell: minikube version
+      register: minikube_version
+      changed_when: false
+
+    - name: Display minikube version
+      debug:
+        msg: "✅ minikube installed: {{ minikube_version.stdout_lines[0] | default('Version info available') }}"
+
+    # Final check before starting cluster
+    - name: Final root check before starting minikube
+      shell: whoami
+      register: whoami_check
+      changed_when: false
+
+    - name: Fail if somehow still root before minikube start
+      fail:
+        msg: "CRITICAL: Still running as root user: {{ whoami_check.stdout }}. Cannot start minikube."
+      when: whoami_check.stdout == "root"
+
+    # Setup .kube directory as non-root user
     - name: Create .kube directory
       file:
         path: "~/.kube"
         state: directory
         mode: '0755'
 
+    # Start Kubernetes Cluster as non-root user
+    - name: Start minikube cluster with Docker driver
+      shell: |
+        export HOME={{ ansible_env.HOME }}
+        minikube start --driver=docker
+      environment:
+        HOME: "{{ ansible_env.HOME }}"
+        USER: "{{ ansible_user }}"
+      timeout: 600
+      when: start_cluster == "yes"
+      register: minikube_start_result
+
+    - name: Display minikube start result
+      debug:
+        msg: "{{ minikube_start_result.stdout_lines }}"
+      when: start_cluster == "yes" and minikube_start_result is defined
+
     - name: Update kubectl context
       shell: minikube update-context
+      environment:
+        HOME: "{{ ansible_env.HOME }}"
+        USER: "{{ ansible_user }}"
       when: start_cluster == "yes"
+
+    - name: Verify cluster status
+      shell: kubectl cluster-info
+      environment:
+        HOME: "{{ ansible_env.HOME }}"
+        USER: "{{ ansible_user }}"
+      register: cluster_info
+      when: start_cluster == "yes"
+      failed_when: false
+
+    - name: Display final status
+      debug:
+        msg: |
+          🎉 Vanilla Kubernetes Installation Complete!
+          ✅ kubectl: Installed ({{ kubectl_version.stdout_lines[1] | default('Installed') }})
+          ✅ minikube: Installed ({{ minikube_version.stdout_lines[0] | default('Installed') }})
+          👤 Running as user: {{ whoami_check.stdout }}
+          {% if start_cluster == "yes" %}
+          ✅ Kubernetes Cluster: {{ 'Running' if cluster_info.rc == 0 else 'Started but may need time to initialize' }}
+          ✅ kubectl config: Configured
+          {% if cluster_info.rc == 0 %}
+          📋 Cluster Info: {{ cluster_info.stdout_lines[0] | default('Available') }}
+          {% endif %}
+          {% else %}
+          ⏸️  Kubernetes Cluster: Ready to start (run: minikube start --driver=docker)
+          {% endif %}
+
+          🔧 Useful commands:
+          • Check status: minikube status
+          • Access dashboard: minikube dashboard
+          • Stop cluster: minikube stop
+          • Delete cluster: minikube delete
