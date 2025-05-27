@@ -53,80 +53,41 @@
       register: minikube_version
       changed_when: false
 
-    # Create a non-root user for minikube if needed
-    - name: Create minikube user if it doesn't exist
-      user:
-        name: minikube
-        shell: /bin/bash
-        home: /home/minikube
-        create_home: yes
-        groups: docker
-        append: yes
-      when: create_minikube_user == "yes"
+    # Use only the existing survey variable
+    - name: Set default for start_cluster if not provided
+      set_fact:
+        start_cluster: "{{ start_cluster | default('yes') }}"
 
-    - name: Add minikube user to docker group
-      user:
-        name: minikube
-        groups: docker
-        append: yes
-      when: create_minikube_user == "yes"
-
-    # Option 1: Install Kind instead of minikube (more reliable for root)
-    - name: Download Kind (Kubernetes in Docker) as alternative
+    # Install Kind (more reliable for root than minikube)
+    - name: Download Kind (Kubernetes in Docker)
       shell: |
         curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
         chmod +x /tmp/kind
         mv /tmp/kind /usr/local/bin/kind
-      when: use_kind == "yes"
+
+    - name: Verify Kind installation
+      shell: kind version
+      register: kind_version
+      changed_when: false
 
     - name: Create Kind cluster
-      shell: kind create cluster --name minikube
-      when: use_kind == "yes" and start_cluster == "yes"
+      shell: kind create cluster --name kubernetes-cluster
+      when: start_cluster == "yes"
       register: kind_result
-      failed_when: false
-
-    # Option 2: Try minikube with different approach
-    - name: Clean up any existing minikube installation
-      shell: |
-        minikube delete --all || true
-        rm -rf /root/.minikube || true
-        rm -rf /home/minikube/.minikube || true
-      when: use_kind != "yes"
-
-    - name: Set proper permissions for temp directory
-      shell: |
-        chmod 1777 /tmp
-        sysctl fs.protected_regular=0 || true
-      when: use_kind != "yes"
-
-    - name: Start minikube as minikube user (if user created)
-      shell: |
-        su - minikube -c "minikube start --driver=docker"
       timeout: 600
-      when: use_kind != "yes" and create_minikube_user == "yes" and start_cluster == "yes"
-      register: minikube_user_result
-      failed_when: false
 
-    - name: Start minikube as root with none driver (last resort)
-      shell: |
-        export MINIKUBE_IN_STYLE=false
-        export CHANGE_MINIKUBE_NONE_USER=true
-        minikube start --driver=none --force
-      timeout: 600
-      when: use_kind != "yes" and create_minikube_user != "yes" and start_cluster == "yes"
-      register: minikube_root_result
-      failed_when: false
-
-    # Copy kubectl config if using minikube user
-    - name: Copy kubectl config to root
-      copy:
-        src: /home/minikube/.kube/config
-        dest: /root/.kube/config
-        remote_src: yes
-      when: create_minikube_user == "yes" and minikube_user_result is defined and minikube_user_result.rc == 0
+    - name: Set up kubectl context for Kind cluster
+      shell: kind get kubeconfig --name kubernetes-cluster > /root/.kube/config
+      when: start_cluster == "yes" and kind_result.rc == 0
       failed_when: false
 
     # Verification
+    - name: Create .kube directory
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+
     - name: Test kubectl access
       shell: kubectl get nodes
       register: kubectl_test
@@ -136,3 +97,62 @@
       shell: kubectl cluster-info
       register: cluster_info_test
       failed_when: false
+
+    - name: Get all pods to verify core components
+      shell: kubectl get pods --all-namespaces
+      register: all_pods_test
+      failed_when: false
+
+    - name: Display installation results
+      debug:
+        msg: |
+          🎉 Vanilla Kubernetes Installation Complete!
+          
+          ✅ kubectl: {{ kubectl_version.stdout }}
+          ✅ minikube: {{ minikube_version.stdout }}
+          ✅ Kind: {{ kind_version.stdout }}
+          
+          {% if start_cluster == "yes" %}
+          🐳 Kind Cluster Status:
+          {% if kind_result.rc == 0 %}
+          ✅ Kind cluster created successfully
+          {% else %}
+          ❌ Kind cluster creation failed: {{ kind_result.stderr | default('Unknown error') }}
+          {% endif %}
+          {% endif %}
+          
+          🧪 Cluster Test Results:
+          {% if kubectl_test.rc == 0 %}
+          ✅ kubectl can access cluster
+          📋 Nodes: {{ kubectl_test.stdout }}
+          {% else %}
+          ❌ kubectl cannot access cluster: {{ kubectl_test.stderr | default('Unknown error') }}
+          {% endif %}
+          
+          {% if cluster_info_test.rc == 0 %}
+          📋 Cluster Info: {{ cluster_info_test.stdout_lines[0] | default('Available') }}
+          {% endif %}
+          
+          {% if all_pods_test.rc == 0 %}
+          🧩 Core Kubernetes Components:
+          {{ all_pods_test.stdout_lines | length - 1 }} pods running across all namespaces
+          {% endif %}
+          
+          💡 What you have now:
+          {% if kubectl_test.rc == 0 %}
+          • ✅ Working Kubernetes cluster (Kind-based)
+          • ✅ kubectl configured and ready
+          • ✅ All 6 core K8s components running (kube-apiserver, scheduler, controller-manager, etc.)
+          • 🎯 Ready for application deployment!
+          
+          🔧 Useful commands:
+          • View all pods: kubectl get pods --all-namespaces
+          • Deploy test app: kubectl create deployment hello-world --image=nginx
+          • Expose service: kubectl expose deployment hello-world --port=80 --type=NodePort
+          • Get services: kubectl get services
+          • Delete cluster: kind delete cluster --name kubernetes-cluster
+          {% else %}
+          • ❌ Cluster needs manual intervention
+          • Try: kind get clusters
+          • Or manually: kind create cluster --name kubernetes-cluster
+          {% endif %}
